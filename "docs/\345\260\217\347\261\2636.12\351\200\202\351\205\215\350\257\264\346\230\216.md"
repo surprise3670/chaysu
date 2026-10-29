@@ -1,0 +1,279 @@
+# Chaysu 管理器 · 小米 6.12 内核适配说明
+
+> 目标设备：`26048RP6AC` / codename `yili` / Android 16 / **6.12.58-android16-6-g3690567af937-abogki504922916-4k**
+> GKI KMI = **android16-6.12**，aarch64，4 KB 页，A/B（当前 slot_b），未 root
+> 适配方式：基于 <https://github.com/baizhou04/chaysu> 源码重编 + 本机 QEMU/DDK 编译内核模块
+
+---
+
+## 一、交付物
+
+| 文件 | 说明 |
+|---|---|
+| `Chaysu_6.12_管理器.apk`（桌面根目录） | 已签名、**已内置 android16-6.12 kernelsu.ko** 的管理器 |
+| `kernelsu-6.12.ko`（桌面根目录） | 单独的内核模块，供「外置 LKM」方式使用 |
+| `Chaysu-6.12-适配资料/使用说明.md` | 本文件 |
+| `…/android16-6.12_kernelsu.ko` | 与 APK 内同一份 KO |
+| `…/chaysu-612.jks` | 本 APK 的签名证书（**务必长期保存**） |
+| `…/签名与构建信息.txt` | 包名 / 证书指纹 / KO 参数 / 校验值 |
+| `…/libksud.so` | 源码编译的 aarch64 ksud（已内嵌 KO） |
+| `…/build-ko-android16-6.12.yml` | 备用：在 GitHub Actions 上重编 KO |
+| `…/重新编译ksud.bat`、`重新编译APK.bat` | 本机一键重编 |
+| `…/手机自检.bat` | 刷机前检查内核/槽位/分区 |
+| `…/SHA256SUMS.txt` | 全部校验值 |
+
+APK：
+
+```
+文件      : Chaysu_1f43367-mi612_30003-release.apk
+包名      : com.chayu.ksu
+版本名    : 1f43367-mi612    版本号: 30003
+minSdk 31 / targetSdk 37 / compileSdk 37
+签名      : V2，证书 SHA-256 = bd0b1e22c3bec938688ee4112e576a38ac73155c647f62d7afeba88891a0e0b6
+大小      : 8,913,887 字节
+SHA-256   : adfb8030f14ce7c2f8783abe19f21d08055f300adf4b6e114b6dea20de11cd14
+```
+
+内核模块：
+
+```
+文件      : android16-6.12_kernelsu.ko
+类型      : ELF64 AArch64 REL（可重定位内核模块），含 BTF / __versions
+大小      : 4,942,848 字节
+SHA-256   : 17bd07c3e3a6cef189d79aca929f71f49017979e0baad9d7fdbbbb8291d53ebf
+vermagic  : 6.12.58-android16-6-g3690567af937-abogki504922916-4k SMP preempt mod_unload modversions aarch64
+身份      : KSU_PACKAGE_NAME=com.chayu.ksu；签名哈希 bd0b1e22…（与本 APK 证书一致）
+```
+
+---
+
+## 二、这次做了什么
+
+### 2.1 内核模块（`kernelsu.ko`）——**这次真的编出来了**
+
+之前的版本缺 KO，安装时会报 `Failed to load android16-6.12_kernelsu.ko`。这次补上了：
+
+1. **确认设备可行性**（用 adb 读 `/proc/config.gz`）：
+   `CONFIG_MODULES=y`、`CONFIG_MODVERSIONS=y`、`CONFIG_MODULE_SIG_FORCE` 未开、
+   `MODULE_SIG_PROTECT` 只保护名单内模块（`kernelsu` 不在名单）、`KPROBES=y`、`KALLSYMS_ALL=y`、
+   `CFI_CLANG=y`、`LTO_NONE=y`、4 KB 页。→ LKM 方案可行。
+2. **编译环境**：这台 Windows 没有 WSL/Docker，也没有管理员权限，因此用
+   QEMU（TCG 软件模拟）+ Ubuntu 24.04 云镜像，把 DDK 容器镜像
+   `ghcr.io/ylarod/ddk-min:android16-6.12-20260828` 的 rootfs 解出来 chroot 进去编；
+   用的是 DDK 自带的 `kdir/android16-6.12`（预生成头文件与 Module.symvers）和
+   `clang-r536225`（正好等于设备内核的构建器），开启 `ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-`。
+3. **vermagic 精确对齐**：编译前把 kdir 的 `include/config/kernel.release` 改成设备的
+   `6.12.58-android16-6-g3690567af937-abogki504922916-4k`，所以产物的 vermagic 和设备**逐字节一致**，
+   不会出现 `invalid module format` 或 `version magic ... should be ...`。
+4. **身份烧进模块**：`KSU_PACKAGE_NAME=com.chayu.ksu`、`KSU_EXPECTED_SIZE=0x0377`、
+   `KSU_EXPECTED_HASH=bd0b1e22…`（就是本包证书），所以内核只认这一个管理器。
+5. **两份交付**：一份内置进 `libksud.so`（APK 直接用），一份单独给你（想手动选 KO 时用）。
+
+### 2.2 管理器侧适配（沿用上一版）
+
+1. **KMI 列表兜底**（`KsuCli.kt`）：ksud 报空时回退已知 KMI 列表，并始终加入本机 KMI。
+2. **内核版本串兜底推断**（`BootKernelVersion.kt`）：没有 `androidNN` 标记时按 `Linux version 6.12` 推断 KMI。
+3. **版本名后缀** `-mi612`。
+4. **Windows 检出修复**：`cpp/uapi`、`kernel/include/uapi` 软链接改实体头文件。
+
+### 2.3 合并上游 `e55669a`（fix）
+
+- `kernel/Kbuild`、`userspace/ksud/build.rs`、`manager/build.gradle.kts`：支持 `KSU_VERSION` 覆盖版本号；
+- `userspace/ksud/src/defs.rs`、`utils.rs`：安装时维护 `/data/adb/ksud → /data/adb/kud` 兼容链接
+  （修 Zygisk Next 等模块硬编码旧路径导致的安装失败）；
+- 已提交为本地 commit `6fa179f`，KO 内置为 `1f43367`。
+
+---
+
+## 三、签名身份（与 KO 绑定）
+
+```
+包名                : com.chayu.ksu
+keystore            : chaysu-612.jks，alias chaysu612，storepass/keypass 都是 chaysu612
+证书 DER 长度        : 887 字节 → KSU_EXPECTED_SIZE=0x0377
+证书 SHA-256        : bd0b1e22c3bec938688ee4112e576a38ac73155c647f62d7afeba88891a0e0b6 → KSU_EXPECTED_HASH
+```
+
+内核 `kernel/manager/apk_sign.c` 的校验：从 APK 的 V2 签名块取证书 DER，先比长度 = `EXPECTED_SIZE`，
+再比 `SHA256(证书) = EXPECTED_HASH`。**换证书/换包名 ⇒ KO 必须重编**（本包已一致）。
+
+---
+
+## 四、⚠️ 当前真正的阻塞：Bootloader 是锁的
+
+实测（2026-10-26 17:20）：
+
+```
+ro.boot.flash.locked      = 1
+ro.boot.verifiedbootstate = green
+ro.boot.vbmeta.device_state = locked
+```
+
+也就是说：**管理器、KO、修补流程都已经通了**（见下面第五节的实际修补日志），
+但 `fastboot flash` / `fastboot boot` 在锁定状态下会被拒绝，改过的 `init_boot` **刷不进去**。
+
+必须先解锁：
+
+1. 设置 → 开发者选项 → 打开「OEM 解锁」（`sys.oem_unlock_allowed` 目前为空，说明这个开关还没开）。
+2. 小米/Redmi 机型要走 **Mi Unlock Tool**（小米解锁工具）：账号绑定设备 → 等待期（通常 7 天）→ 解锁。
+3. 解锁会**清空全部数据**、并让设备进入 `orange` 状态（部分银行/支付类 App 会受限）。
+
+解锁完成后再走第六节刷入流程。**在解锁之前，任何「修补 boot」的方案都不可能生效**——
+这不是 chaysu 或 KO 的问题。
+
+## 五、怎么用（解锁之后）
+
+APK 已内置 KO，**不需要再选 .ko 文件**：
+
+1. 装或升级到桌面这个 APK（同签名，直接覆盖安装即可；版本 30003 > 30002）。
+2. 打开 Chaysu → 主页显示「未安装」→ 点它。
+3. 选择 **「选择文件 / SelectFile」** → 选你的原厂 `init_boot.img`（你上次用的那个）。
+4. 直接点开始（KMI 会自动识别成 `android16-6.12`，并用内置 KO）。
+5. 产物在 `Download/kernelsu_patched_xxx.img`。
+6. **先试启动、再刷写**：
+
+   ```bash
+   adb reboot bootloader
+   fastboot boot kernelsu_patched_xxx.img      # 只临时启动，不写分区
+   ```
+
+   起来后打开 Chaysu 看是否「工作中」；确认没问题再写：
+
+   ```bash
+   fastboot flash init_boot_b kernelsu_patched_xxx.img   # 你当前是 slot_b
+   fastboot reboot
+   ```
+
+   或继续用 App 里的「直接安装」。
+
+> 想用外置 KO（比如以后自己重编）：高级选项 → 选 LKM 文件 → 选 `kernelsu-6.12.ko`。
+
+### 验证
+
+```bash
+adb shell su -c "/data/adb/kud debug info"
+adb shell su -c "dmesg | grep -i 'Crowning manager'"
+```
+
+---
+
+## 六、如果还是失败
+
+| 现象 | 含义 / 处理 |
+|---|---|
+| `Failed to load android16-6.12_kernelsu.ko` | 说明装的还是旧 APK（30002）或 ksud 没嵌入 KO；确认版本号 30003 / 文件大小 8.9 MB |
+| 刷入后卡开机 | 说明 KO 加载失败；`fastboot flash init_boot_b <原厂 init_boot>.img` 回滚 |
+| `Invalid module format` | vermagic 不符（本 KO 已按设备 release 编，正常不会） |
+| `disagrees about version of symbol` | MODVERSIONS 符号 CRC 不符：说明厂商改过导出符号，需要厂商内核源码重编 |
+| `Unknown symbol` | 厂商裁了某个导出符号；看 dmesg 里具体名字 |
+| 管理器显示「未安装」但已经刷入 | 包名/证书哈希与 KO 不匹配（换过证书就会这样） |
+
+---
+
+## 七、可复现的构建环境
+
+```
+JDK        : Temurin 21.0.12.1
+Android SDK: platforms;android-37.0 / build-tools;37.0.0 / ndk;29.0.14206865 / cmake 3.22.1
+Gradle     : 9.7.1 (wrapper)   AGP 9.4.1   Kotlin 2.4.20   Compose BOM 2026.09.00
+Rust       : 1.99.1（host x86_64-pc-windows-gnu → aarch64-linux-android）
+MinGW-w64  : GCC 16.2.0（Rust 宿主侧编译）
+QEMU       : 11.x（Windows，TCG） + Ubuntu 24.04 云镜像（仅用于编 KO）
+DDK        : ghcr.io/ylarod/ddk-min:android16-6.12-20260828（kdir + clang-r536225）
+```
+
+管理器：
+
+```powershell
+cd chaysu\manager
+.\gradlew.bat assembleRelease -PKSU_PACKAGE_NAME=com.chayu.ksu -PKSU_NAME=Chaysu --no-daemon
+```
+
+ksud（含 KO 内嵌）：
+
+```powershell
+# KO 放 userspace\ksud\bin\aarch64\<kmi>_kernelsu.ko 后
+powershell -File build-ksud-dyn.ps1 ksudonly
+```
+
+KO：见第七节。
+
+---
+
+## 八、KO 是怎么编的（复现步骤）
+
+1. 拉 DDK 镜像的 9 个 layer（`ghcr.io/ylarod/ddk-min:android16-6.12-20260828`，约 2.57 GB），
+   在 Linux 里按顺序 `tar -xzf` 到 `/opt/ddkroot`（Windows 上解不了，rootfs 里有大量软链接）。
+2. `chroot /opt/ddkroot`，环境变量照镜像的：
+   `PATH=/opt/ddk/clang/clang-r536225/bin:…`、`KDIR=/opt/ddk/kdir/android16-6.12`、
+   `ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1`。
+3. 把 `$KDIR/include/config/kernel.release` 改成设备 release（关键一步）。
+4. `cd /work/kernel && CONFIG_KSU=m make -j8 CC=clang KSU_PACKAGE_NAME=… KSU_EXPECTED_SIZE=0x0377 KSU_EXPECTED_HASH=…`
+5. 产物 `kernelsu.ko`，校验 `strings | grep -E "package name|signature size|signature hash"` 与 vermagic。
+
+没有 Linux 机器时：把 `build-ko-android16-6.12.yml` 放到 GitHub 仓库的 Actions 里跑，参数已填好。
+
+---
+
+## 九、验证记录
+
+| 项目 | 方法 | 结果 |
+|---|---|---|
+| 设备真实信息 | `adb shell getprop/uname` | 26048RP6AC / yili / Android 16 / 6.12.58…-4k / aarch64 / slot_b |
+| 模块加载可行性 | 读 `/proc/config.gz` | MODULES=y、MODVERSIONS=y、SIG_FORCE 未开、KPROBES=y |
+| KO 架构 | `llvm-readelf -h` | ELF64 AArch64 REL |
+| KO vermagic | 二进制内 `vermagic=` | 与设备 `uname -r` **完全一致** |
+| KO 身份 | 二进制内字符串 | `com.chayu.ksu` + `bd0b1e22…` 均在 |
+| APK 版本/签名 | `aapt2` / `apksigner` | 30003 / 1f43367-mi612 / V2 证书 bd0b1e22… |
+| KO 是否内嵌 | 解包 libksud.so 查资产名 | `android16-6.12_kernelsu.ko` 存在（libksud 6,320,024 字节） |
+| 真机镜像修补 | 用 adb 直接跑 ksud `boot-patch`（设备上的原厂 init_boot.img） | **成功**（输出见下） |
+
+**已验证到哪一步**：管理器 / KO / 真机修补链路全部打通，当时的输出：
+
+```
+- Bootdevice: /storage/emulated/0/Download/init_boot.img
+- Preparing assets
+- Unpacking boot image
+- KMI: android16-6.12
+- Adding KernelSU LKM
+- Adding bundled LKM config
+- Repacking boot image
+- Output file is written to
+- /sdcard/Download/kernelsu_patched_20261026_092015.img
+- Done!
+```
+
+产物：`kernelsu_patched_20261026_092015.img`，8,388,608 字节，与原厂镜像同尺寸、
+有 5,758,071 字节不同（LKM 已注入 ramdisk）。原厂 `init_boot.img` 8,388,608 字节，已备份进桌面资料。
+
+**还没验证的**：刷入后 KO 能否真正加载 —— 因为 **bootloader 锁定**（第四节），现在刷不进去。
+解锁后先 `fastboot boot` 试一次即可确认；MODVERSIONS 符号 CRC 是否与厂商内核完全一致，
+也只有实机能证明（GKI 的 KMI 约定理论上保证一致）。
+
+---
+
+## 十、以后自己重编
+
+| 脚本 | 作用 |
+|------|------|
+| `重新编译ksud.bat` | 重编 ksud/ksuinit（会把 `bin/aarch64/*_kernelsu.ko` 一起内嵌） |
+| `重新编译APK.bat`  | 重编并签名 APK |
+
+依赖目录（别删）：
+
+```
+C:\chaysu-build\jdk / rustup / cargo / mingw / gradle-home   （管理器与 ksud）
+C:\chaysu-build\vm\disk.qcow2 + qemu                          （编 KO 的虚拟机，可删）
+C:\AndroidSdk                                                 （SDK/NDK/build-tools）
+C:\chaysu-build\ddk                                           （DDK 9 个 layer，约 2.6GB）
+源码：C:\Users\30668\Documents\deepseek-harness\default-workspace\chaysu
+```
+
+---
+
+## 十一、边界与合规
+
+- 本项目为 GPL-3.0（管理器）/ GPL-2.0（内核部分），遵循上游声明；仅供个人设备研究与自用。
+- 刷机有风险：务必先备份 `init_boot`，优先 `fastboot boot` 试启动。
+- `kernelsu` 不在厂商 `MODULE_SIG_PROTECT` 名单内，未签名模块可以加载；但如果小米以后的版本把它加进名单，
+  就需要厂商签名或改用内核内嵌方案。

@@ -1,0 +1,7 @@
+*.bat eol=crlf
+
+# Shell scripts are executed on-device or embedded into ksud at build time
+# (userspace/ksud/src/installer.sh via include_str!). They must stay LF:
+# a CRLF checkout makes busybox ash fail instantly, which surfaces in the
+# manager as "Failed to install module script".
+*.sh text eol=lf

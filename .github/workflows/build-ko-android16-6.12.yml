@@ -1,0 +1,42 @@
+name: Build Chaysu KO for Xiaomi 6.12
+
+# 一键编译 android16-6.12 的 kernelsu.ko
+# 直接把这个文件放到 fork 出来的 chaysu 仓库 .github/workflows/ 下，
+# Actions 页面手动 Run workflow 即可，不需要改任何参数。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ko:
+    name: kernelsu.ko (android16-6.12)
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk-min:android16-6.12-20260828
+      options: --privileged
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build kernelsu.ko
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd kernel
+          echo "=== building for android16-6.12 ==="
+          CONFIG_KSU=m CC=clang make \
+            KSU_PACKAGE_NAME=com.chayu.ksu \
+            KSU_EXPECTED_SIZE=0x0377 \
+            KSU_EXPECTED_HASH=bd0b1e22c3bec938688ee4112e576a38ac73155c647f62d7afeba88891a0e0b6
+          ls -l kernelsu.ko
+          echo "=== verify embedded identity ==="
+          strings kernelsu.ko | grep -E "package name|signature"
+          llvm-strip -d kernelsu.ko || true
+
+      - name: Upload kernelsu.ko
+        uses: actions/upload-artifact@v4
+        with:
+          name: android16-6.12-kernelsu
+          path: kernel/kernelsu.ko
+          if-no-files-found: error
