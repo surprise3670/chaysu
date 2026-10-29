@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Build kernelsu.ko
         run: |
@@ -35,7 +35,7 @@ jobs:
           llvm-strip -d kernelsu.ko || true
 
       - name: Upload kernelsu.ko
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: android16-6.12-kernelsu
           path: kernel/kernelsu.ko
